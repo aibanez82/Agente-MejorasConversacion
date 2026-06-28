@@ -145,7 +145,7 @@ FROM qualitas_lead l
 LEFT JOIN qualitas_cotizacion c   ON l.cotizacion_id = c.id
 LEFT JOIN whatsapp_sessions ws    ON ws.quotation_id = c.id
 LEFT JOIN n8n_chat_histories nch  ON nch.session_id = ws.session_id
-WHERE ws.conversation_phase IN ('payment_pending', 'completed')
+WHERE ws.conversation_phase IN ('policy_issuance', 'payment_pending', 'completed')
   AND l.fecha_creacion >= 'FECHA_INICIO'::date
   AND l.fecha_creacion <  'FECHA_FIN'::date + INTERVAL '1 day'
 ORDER BY l.id, nch.created_at;
@@ -155,15 +155,31 @@ ORDER BY l.id, nch.created_at;
 
 Con los resultados de las dos queries, clasifica cada lead en una de estas categorías y calcula el porcentaje sobre el total:
 
-| Categoría | Criterio |
-|---|---|
-| Nunca respondieron | `conversation_phase = 'greeting'` Y cero mensajes con `role = 'human'` en `n8n_chat_histories` |
-| Abandonaron en data_capture | `conversation_phase = 'data_capture'` Y `last_activity < NOW() - 48h` |
-| Abandonaron en summary_confirmation | `conversation_phase = 'summary_confirmation'` Y `last_activity < NOW() - 48h` |
-| Llegaron a póliza emitida | `conversation_phase = 'payment_pending'` |
-| Pagaron | `conversation_phase = 'completed'` |
+| Categoría | Criterio | Descripción |
+|---|---|---|
+| Nunca respondieron | `conversation_phase = 'greeting'` Y cero mensajes con `role = 'human'` en `n8n_chat_histories` | El lead recibió el primer mensaje pero nunca contestó |
+| Abandonaron en data_capture | `conversation_phase = 'data_capture'` Y `last_activity < NOW() - 48h` | El lead respondió pero dejó de contestar en captura de datos |
+| Abandonaron en summary_confirmation | `conversation_phase = 'summary_confirmation'` Y `last_activity < NOW() - 48h` | El lead no confirmó el resumen de su cotización |
+| En emisión de póliza | `conversation_phase = 'policy_issuance'` | Qualitas está emitiendo la póliza, proceso en curso |
+| Pago pendiente | `conversation_phase = 'payment_pending'` | La póliza fue emitida, pendiente de pago |
+| Pagaron | `conversation_phase = 'completed'` | Pago confirmado, lead convertido |
+| Bot no disparó el mensaje | Sin fila en `whatsapp_sessions` (ws.id IS NULL) | n8n no envió el primer mensaje |
 
 Si un lead no tiene registros en `n8n_chat_histories`, anótalo: es el bug conocido de sesiones sin historial. Cuéntalo en el total pero agrégalo a "Nunca respondieron".
+
+**Nota sobre leads sin sesión WhatsApp:** Las queries anteriores excluyen leads que no tienen fila en `whatsapp_sessions` (porque el filtro `WHERE ws.conversation_phase IN (...)` descarta los NULL). Para contabilizarlos, ejecuta esta query adicional y suma el resultado a la categoría "Bot no disparó el mensaje":
+
+```sql
+SELECT COUNT(*) AS sin_sesion_wa
+FROM qualitas_lead l
+LEFT JOIN qualitas_cotizacion c   ON l.cotizacion_id = c.id
+LEFT JOIN whatsapp_sessions ws    ON ws.quotation_id = c.id
+WHERE ws.id IS NULL
+  AND l.fecha_creacion >= 'FECHA_INICIO'::date
+  AND l.fecha_creacion <  'FECHA_FIN'::date + INTERVAL '1 day';
+```
+
+Añade esta categoría al mapa de abandono con el conteo obtenido.
 
 ### Paso 3 — Análisis de copy por fase
 
@@ -228,7 +244,7 @@ Guarda el informe en `informes/YYYY-MM-DD-analisis.md` (usa la fecha de hoy como
 
 ## Recomendaciones priorizadas
 
-1. **[Recomendación de mayor impacto estimado]** — [acción concreta: qué nodo de n8n o qué template cambiar, con el texto exacto]
+1. **[Recomendación de mayor impacto estimado]** — Fase: [nombre de fase]. Mensaje actual: "[texto actual]". Mensaje sugerido: "[texto propuesto]". Motivo: [razón del cambio].
 2. [Siguiente recomendación]
 3. [...]
 4. [...]
@@ -245,4 +261,4 @@ _(Máximo 5 recomendaciones, ordenadas de mayor a menor impacto estimado)_
 2. Ejecuta los 4 pasos en orden; no omitas ninguno
 3. Si `n8n_chat_histories` está vacío para un lead, anótalo en el informe (es un bug conocido: ~89% de sesiones no tienen historial guardado)
 4. Guarda el informe en `informes/` antes de responder al usuario con el resumen
-5. En las recomendaciones, especifica el nodo o template exacto de n8n a cambiar — no recomendaciones genéricas
+5. En las recomendaciones, describe con precisión: qué fase del flujo cambiar, qué mensaje actual es el problema, y cuál es el texto sugerido. El Arquitecto y Alberto identificarán el nodo de n8n correspondiente. No escribas recomendaciones vagas como "mejorar el tono" sin incluir el texto concreto.
