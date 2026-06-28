@@ -167,6 +167,8 @@ Con los resultados de las dos queries, clasifica cada lead en una de estas categ
 
 Si un lead no tiene registros en `n8n_chat_histories`, anótalo: es el bug conocido de sesiones sin historial. Cuéntalo en el total pero agrégalo a "Nunca respondieron".
 
+**Nota:** El filtro `last_activity < NOW() - INTERVAL '48 hours'` ya fue aplicado por Query A. Los resultados que tienes en memoria ya cumplen esa condición — no necesitas volver a filtrarlos.
+
 **Nota sobre leads sin sesión WhatsApp:** Las queries anteriores excluyen leads que no tienen fila en `whatsapp_sessions` (porque el filtro `WHERE ws.conversation_phase IN (...)` descarta los NULL). Para contabilizarlos, ejecuta esta query adicional y suma el resultado a la categoría "Bot no disparó el mensaje":
 
 ```sql
@@ -185,7 +187,24 @@ Añade esta categoría al mapa de abandono con el conteo obtenido.
 
 Para cada categoría de abandono que represente más del 10% del total:
 
-1. Extrae el texto del **último mensaje del bot** (`role = 'ai'`) antes del silencio del lead
+1. Extrae el texto del **último mensaje del bot** antes del silencio del lead. Para cada `session_id` en los resultados de Query A: toma el mensaje con el mayor `created_at` donde `role = 'ai'` y no exista ningún mensaje posterior con `role = 'human'` en esa misma sesión. Si el agente necesita ejecutar una query adicional para obtener esto con precisión:
+
+   ```sql
+   SELECT DISTINCT ON (nch.session_id)
+     nch.session_id,
+     nch.message AS ultimo_msg_bot,
+     nch.created_at
+   FROM n8n_chat_histories nch
+   WHERE nch.session_id IN (<lista de session_ids de leads con abandono>)
+     AND nch.role = 'ai'
+     AND NOT EXISTS (
+       SELECT 1 FROM n8n_chat_histories h2
+       WHERE h2.session_id = nch.session_id
+         AND h2.role = 'human'
+         AND h2.created_at > nch.created_at
+     )
+   ORDER BY nch.session_id, nch.created_at DESC;
+   ```
 2. Identifica cuáles de estos patrones están presentes en ese mensaje:
    - Longitud: más de 300 caracteres sin salto de línea
    - Preguntas múltiples en el mismo mensaje
@@ -219,9 +238,11 @@ Guarda el informe en `informes/YYYY-MM-DD-analisis.md` (usa la fecha de hoy como
 | Fase | Leads | % del total |
 |---|---|---|
 | Nunca respondieron | X | X% |
+| Bot no disparó el mensaje | X | X% |
 | Abandonaron en data_capture | X | X% |
 | Abandonaron en summary_confirmation | X | X% |
-| Llegaron a póliza emitida | X | X% |
+| En emisión de póliza | X | X% |
+| Pago pendiente | X | X% |
 | Pagaron | X | X% |
 | **Total** | **X** | **100%** |
 
