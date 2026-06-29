@@ -82,9 +82,8 @@ conn.close()
 | Columna | Tipo | Notas |
 |---|---|---|
 | `session_id` | varchar | FK → `whatsapp_sessions.session_id` |
-| `message` | text | Texto del mensaje |
-| `role` | varchar | `ai` (bot) o `human` (lead) |
-| `created_at` | timestamp | Momento del mensaje |
+| `message` | jsonb | Objeto JSON — texto en `message->>'content'`, tipo en `message->>'type'` (`'ai'` = bot, `'human'` = lead) |
+| `id` | int | PK autoincremental — usar para orden cronológico (no existe `created_at`) |
 
 ### JOINs correctos
 
@@ -116,9 +115,9 @@ SELECT
   c.email,
   c.telefono,
   nch.session_id,
-  nch.message,
-  nch.role,
-  nch.created_at  AS msg_ts
+  nch.message->>'content' AS message,
+  nch.message->>'type'    AS role,
+  nch.id                  AS msg_id
 FROM qualitas_lead l
 LEFT JOIN qualitas_cotizacion c   ON l.cotizacion_id = c.id
 LEFT JOIN whatsapp_sessions ws    ON ws.quotation_id = c.id
@@ -127,7 +126,7 @@ WHERE ws.conversation_phase IN ('greeting', 'data_capture', 'summary_confirmatio
   AND ws.last_activity < NOW() - INTERVAL '48 hours'
   AND l.fecha_creacion >= 'FECHA_INICIO'::date
   AND l.fecha_creacion <  'FECHA_FIN'::date + INTERVAL '1 day'
-ORDER BY l.id, nch.created_at;
+ORDER BY l.id, nch.id;
 ```
 
 **Query B — Conversaciones exitosas (referencia):**
@@ -138,9 +137,9 @@ SELECT
   l.estado,
   ws.conversation_phase,
   nch.session_id,
-  nch.message,
-  nch.role,
-  nch.created_at  AS msg_ts
+  nch.message->>'content' AS message,
+  nch.message->>'type'    AS role,
+  nch.id                  AS msg_id
 FROM qualitas_lead l
 LEFT JOIN qualitas_cotizacion c   ON l.cotizacion_id = c.id
 LEFT JOIN whatsapp_sessions ws    ON ws.quotation_id = c.id
@@ -148,7 +147,7 @@ LEFT JOIN n8n_chat_histories nch  ON nch.session_id = ws.session_id
 WHERE ws.conversation_phase IN ('policy_issuance', 'payment_pending', 'completed')
   AND l.fecha_creacion >= 'FECHA_INICIO'::date
   AND l.fecha_creacion <  'FECHA_FIN'::date + INTERVAL '1 day'
-ORDER BY l.id, nch.created_at;
+ORDER BY l.id, nch.id;
 ```
 
 ### Paso 2 — Clasificación por outcome
@@ -157,7 +156,7 @@ Con los resultados de las dos queries, clasifica cada lead en una de estas categ
 
 | Categoría | Criterio | Descripción |
 |---|---|---|
-| Nunca respondieron | `conversation_phase = 'greeting'` Y cero mensajes con `role = 'human'` en `n8n_chat_histories` | El lead recibió el primer mensaje pero nunca contestó |
+| Nunca respondieron | `conversation_phase = 'greeting'` Y cero mensajes con `message->>'type' = 'human'` en `n8n_chat_histories` | El lead recibió el primer mensaje pero nunca contestó |
 | Abandonaron en data_capture | `conversation_phase = 'data_capture'` Y `last_activity < NOW() - 48h` | El lead respondió pero dejó de contestar en captura de datos |
 | Abandonaron en summary_confirmation | `conversation_phase = 'summary_confirmation'` Y `last_activity < NOW() - 48h` | El lead no confirmó el resumen de su cotización |
 | En emisión de póliza | `conversation_phase = 'policy_issuance'` | Qualitas está emitiendo la póliza, proceso en curso |
@@ -187,23 +186,23 @@ Añade esta categoría al mapa de abandono con el conteo obtenido.
 
 Para cada categoría de abandono que represente más del 10% del total:
 
-1. Extrae el texto del **último mensaje del bot** antes del silencio del lead. Para cada `session_id` en los resultados de Query A: toma el mensaje con el mayor `created_at` donde `role = 'ai'` y no exista ningún mensaje posterior con `role = 'human'` en esa misma sesión. Si el agente necesita ejecutar una query adicional para obtener esto con precisión:
+1. Extrae el texto del **último mensaje del bot** antes del silencio del lead. Para cada `session_id` en los resultados de Query A: toma el mensaje con el mayor `id` donde `message->>'type' = 'ai'` y no exista ningún mensaje posterior con `message->>'type' = 'human'` en esa misma sesión. Si el agente necesita ejecutar una query adicional para obtener esto con precisión:
 
    ```sql
    SELECT DISTINCT ON (nch.session_id)
      nch.session_id,
-     nch.message AS ultimo_msg_bot,
-     nch.created_at
+     nch.message->>'content' AS ultimo_msg_bot,
+     nch.id
    FROM n8n_chat_histories nch
    WHERE nch.session_id IN (<lista de session_ids de leads con abandono>)
-     AND nch.role = 'ai'
+     AND nch.message->>'type' = 'ai'
      AND NOT EXISTS (
        SELECT 1 FROM n8n_chat_histories h2
        WHERE h2.session_id = nch.session_id
-         AND h2.role = 'human'
-         AND h2.created_at > nch.created_at
+         AND h2.message->>'type' = 'human'
+         AND h2.id > nch.id
      )
-   ORDER BY nch.session_id, nch.created_at DESC;
+   ORDER BY nch.session_id, nch.id DESC;
    ```
 2. Identifica cuáles de estos patrones están presentes en ese mensaje:
    - Longitud: más de 300 caracteres sin salto de línea
